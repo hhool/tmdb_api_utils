@@ -1,26 +1,39 @@
+import sys
+import os
 import requests
 import time
 from datetime import datetime
 from openpyxl import Workbook
-from openpyxl.drawing.image import Image
-from io import BytesIO
+import argparse
 
-API_KEY = "9a929d6de568816820a43e8d097efbdd"
-BASE_URL = "https://api.themoviedb.org/3"
-IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w200"  # Poster image size
-DELAY_SECONDS = 1  # Normal request interval
-RETRY_DELAY = 3    # Retry interval after failure
-
-# Enhanced request function with infinite retry
-def make_request(url, params):
+def fetch_all_anime(entry_param, media_type):
+    all_data = []
     first_failure_time = None
     last_alert_time = None
-    
-    while True:
+    RETRY_DELAY = 5  # seconds
+    MAX_RETRIES = 3  # maximum number of retries
+
+    page = 1
+    total_pages = 1
+    retry_count = 0
+    while page <= total_pages:
+        url = f"https://api.themoviedb.org/3/search/{media_type}"
+        params = {
+            "api_key": "9a929d6de568816820a43e8d097efbdd",
+            "with_genres": "16",  # Genre ID for Animation
+            "page": page,
+            "sort_by": "popularity.desc", # Sort by popularity in descending order
+            "query": entry_param  # Filter titles starting with 'A'
+        }
         try:
             response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            total_pages = data["total_pages"]
+            all_data.extend(data["results"])
+            page += 1
+            print(f"Retrieved {len(all_data)} items so far...", end='\r')
+            retry_count = 0  # reset retry count on success
         except (requests.exceptions.RequestException, ValueError) as e:
             now = datetime.now()
             error_msg = str(e).replace('\n', ' ')[:100]  # Truncate error message
@@ -33,40 +46,50 @@ def make_request(url, params):
                 print(f"[Retrying] First failure: {first_failure_time.strftime('%H:%M:%S')} | Latest error: {error_msg}...      ", end='\r')
                 last_alert_time = now
             
+            retry_count += 1
+            if retry_count >= MAX_RETRIES or isinstance(e, requests.exceptions.ConnectTimeout):
+                print("\n[Max Retries Reached or Connection Timeout] Saving data and exiting...")
+                filtered_data = filter_data(all_data, entry_param, media_type)
+                # check media type and make filename
+                if entry_param.isalnum():
+                    filename = f"{media_type}_{entry_param.lower()}"
+                else:
+                    filename = f"{media_type}_other"
+                save_category_to_excel(filtered_data, filename, media_type)
+                print(f"Data saved to tmdb-az/{filename}.xlsx")
+                exit(1)
+            
             time.sleep(RETRY_DELAY)
         except KeyboardInterrupt:
             print("\n[User Interruption] Program terminated by user")
+            filtered_data = filter_data(all_data, entry_param, media_type)
+            # check media type and make filename
+            if entry_param.isalnum():
+                filename = f"{media_type}_{entry_param.lower()}"
+            else:
+                filename = f"{media_type}_other"
+            save_category_to_excel(filtered_data, filename, media_type)
+            print(f"Data saved to tmdb-az/{filename}.xlsx")
             exit(1)
-
-def fetch_all_anime():
-    all_data = []
     
-    for media_type in ["movie", "tv"]:
-        page = 1
-        total_pages = 1
+    return filter_data(all_data, entry_param, media_type)
+
+def filter_data(all_data, entry_param, media_type):
+    filtered_data = []
+    for item in all_data:
+        title = item.get("title") if media_type == "movie" else item.get("name")
+        if not title:
+            continue
         
-        while page <= total_pages:
-            url = f"{BASE_URL}/discover/{media_type}"
-            params = {
-                "api_key": API_KEY,
-                "with_genres": 16,
-                "sort_by": "popularity.desc",
-                "page": page
-            }
-            
-            response = make_request(url, params)
-            
-            if "results" in response:
-                for item in response["results"]:
-                    item["media_type"] = media_type
-                all_data.extend(response["results"])
-                total_pages = response.get("total_pages", 1)
-                page += 1
-                time.sleep(DELAY_SECONDS)
+        first_char = title.strip()[0].upper() if title.strip() else ''
+        if entry_param.isalnum() and entry_param.upper() == first_char:
+            filtered_data.append(item)
+        elif entry_param == '!' and not first_char.isalnum():
+            filtered_data.append(item)
+    
+    return filtered_data
 
-    return all_data
-
-def save_category_to_excel(category_data, category_name):
+def save_category_to_excel(category_data, category_name, media_type):
     if not category_data:
         return
     
@@ -86,84 +109,40 @@ def save_category_to_excel(category_data, category_name):
     
     # Populate data
     for idx, item in enumerate(category_data, 1):
-        media_type = item["media_type"]
         tmdb_id = item.get("id", "N/A")
         title = item.get("title") if media_type == "movie" else item.get("name")
         release_date = item.get("release_date") if media_type == "movie" else item.get("first_air_date")
         
         # Handle poster image
-        poster_path = item.get("poster_path")
-        img_url = f"{IMAGE_BASE_URL}{poster_path}" if poster_path else None
-        img_data = None
-        if img_url:
-            try:
-                response = requests.get(img_url)
-                img_data = BytesIO(response.content)
-            except:
-                img_data = None
+        poster_path = item.get("poster_path", "")
+        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else "N/A"
         
-        # Add row data
-        row = [
-            idx,
-            tmdb_id,
-            title,
-            "Movie" if media_type == "movie" else "TV",
-            item.get("vote_average", "N/A"),
-            item.get("vote_count", "N/A"),
-            item.get("popularity", "N/A"),
-            release_date,
-            "Poster" if img_data else "No Poster"
-        ]
+        row = [idx, tmdb_id, title, media_type, item.get("vote_average", "N/A"), 
+               item.get("vote_count", "N/A"), item.get("popularity", "N/A"), 
+               release_date, poster_url]
         ws.append(row)
-        
-        # Insert image
-        if img_data:
-            img = Image(img_data)
-            img.width = 80
-            img.height = 120
-            ws.add_image(img, f'I{idx + 1}')
     
-    # Save file
-    filename = f"{category_name}.xlsx" if category_name != "other" else "other.xlsx"
-    wb.save(filename)
-    print(f"File {filename} generated successfully!")
-
-def main():
-    try:
-        print("[Start] Data collection initiated (Ctrl+C to abort)")
-        all_anime = fetch_all_anime()
-        print(f"\nSuccessfully collected {len(all_anime)} entries")
-        
-        # Categorization
-        categories = {chr(c): [] for c in range(65, 91)}  # A-Z
-        categories["other"] = []
-        
-        for item in all_anime:
-            title = item.get("title") if item["media_type"] == "movie" else item.get("name")
-            if not title:
-                categories["other"].append(item)
-                continue
-            
-            first_char = title.strip()[0].upper() if title.strip() else ''
-            if first_char.isalpha() and 'A' <= first_char <= 'Z':
-                categories[first_char].append(item)
-            else:
-                categories["other"].append(item)
-        
-        # Save categories
-        for char, data in categories.items():
-            save_category_to_excel(data, char)
-        
-        print("All files generated successfully!")
-    except KeyboardInterrupt:
-        print("\n[Interruption] Data saving aborted by user")
-        # Save the collected data so far
-        for char, data in categories.items():
-            save_category_to_excel(data, char)
-    except Exception as e:
-        print(f"\n[Critical Error] {str(e).replace('\n', ' ')}")
-    finally:
-        print("Program exited")
+    # Ensure the directory exists
+    os.makedirs("tmdb-az", exist_ok=True)
+    wb.save(f"tmdb-az/{category_name}.xlsx")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Fetch and save TMDB anime data based on entry parameter.")
+    parser.add_argument("-t", "--title", required=True, help="Entry parameter to filter anime titles (A-Z, 0-9, or ! for others).")
+    args = parser.parse_args()
+    
+    entry_param = args.title
+    all_anime_tv = fetch_all_anime(entry_param, "tv")
+    all_anime_movie = fetch_all_anime(entry_param, "movie")
+    
+    if entry_param.isalnum():
+        filename_tv = f"tv_{entry_param.lower()}"
+        filename_movie = f"movie_{entry_param.lower()}"
+    else:
+        filename_tv = "tv_other"
+        filename_movie = "movie_other"
+    
+    save_category_to_excel(all_anime_tv, filename_tv, "tv")
+    save_category_to_excel(all_anime_movie, filename_movie, "movie")
+    print(f"Successfully collected {len(all_anime_tv)} TV entries and saved to tmdb-az/{filename_tv}.xlsx")
+    print(f"Successfully collected {len(all_anime_movie)} movie entries and saved to tmdb-az/{filename_movie}.xlsx")

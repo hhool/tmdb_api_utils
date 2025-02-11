@@ -7,3 +7,7 @@
 /.idea
 /.gradle
 /*.xlsx
+
+/tmdb-az
+/tmdb-az.iml
+/tmdb-top
